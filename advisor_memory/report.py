@@ -81,17 +81,19 @@ def report(root: str, data: str, split: str = "test") -> str:
             other = sum(v for k, v in c.items() if k not in named + ["abstained", "answered_unanswerable", None])
             lines.append(f"| {s} | " + " | ".join(str(c.get(k, 0)) for k in named) +
                          f" | {other} | {c.get('abstained', 0)} | {c.get('answered_unanswerable', 0)} | {c.get(None, 0)} |")
-        lines += ["", hypotheses(reader, recs), ""]
-    lines += [mem0_events(root), ""]
+        lines += ["", hypotheses(reader, recs), "", knowledge_updates(reader, recs, systems), "",
+                  empty_answers(reader, recs, systems), ""]
+    lines += [mem0_events(root, sorted({q["cid"] for q in qs.values()})), ""]
     return "\n".join(lines)
 
 
-def _paired(reader, recs, a: str, b: str, pred=lambda q, r: float(r["score"]["correct"]), filt=lambda q: True) -> str:
+def _paired(reader, recs, a: str, b: str, pred=lambda q, r: float(r["score"]["correct"]), filt=lambda q: True,
+            keep=lambda ra, rb: True) -> str:
     ra, rb = recs(reader, a), recs(reader, b)
     per = defaultdict(list)
     for qid in sorted(set(ra) & set(rb)):
         q = ra[qid]
-        if filt(q):
+        if filt(q) and keep(ra[qid], rb[qid]):
             per[q["cid"]].append(pred(q, ra[qid]) - pred(q, rb[qid]))
     if not per:
         return "not run"
@@ -123,18 +125,56 @@ def hypotheses(reader, recs) -> str:
     return "\n".join(out)
 
 
-def mem0_events(root: str) -> str:
+def knowledge_updates(reader, recs, systems) -> str:
+    """Exploratory: H2's stale rate counts abstentions as not stale, so show what each system did instead."""
+    out = ["### Knowledge-update questions in full (exploratory, not pre-registered)", "",
+           "| System | n | correct | stale value | other wrong value | abstained | stale share of answers given |",
+           "|---|---|---|---|---|---|---|"]
+    for s in systems:
+        r = [x for x in recs(reader, s).values() if x["cat"] == "knowledge_update"]
+        ok = sum(x["score"]["correct"] for x in r)
+        stale = sum(x["score"]["trap"] == "stale" for x in r)
+        abst = sum(x["score"]["trap"] == "abstained" for x in r)
+        given = len(r) - abst
+        out.append(f"| {s} | {len(r)} | {ok} | {stale} | {len(r) - ok - stale - abst} | {abst} | "
+                   f"{f'{100 * stale / given:.0f}%' if given else 'n/a'} |")
+    return "\n".join(out)
+
+
+def empty_answers(reader, recs, systems) -> str:
+    """Exploratory: the pre-registered scoring counts an empty answer field as wrong. Show how many there were and
+    whether the hypothesis comparisons change when questions with an empty answer on either side are left out."""
+    empty = lambda x: x["score"]["status"] == "no_answer"
+    out = ["### Empty answer fields (exploratory, not pre-registered)", "",
+           "| System | empty answers | of which dollar amounts | accuracy on the rest % |", "|---|---|---|---|"]
+    for s in systems:
+        r = list(recs(reader, s).values())
+        e = [x for x in r if empty(x)]
+        rest = [x for x in r if not empty(x)]
+        out.append(f"| {s} | {len(e)} | {sum(x['kind'] == 'money' for x in e)} | "
+                   f"{100 * np.mean([x['score']['correct'] for x in rest]):.1f} |")
+    both = lambda x, y: not empty(x) and not empty(y)
+    out += ["", "Paired comparisons without those questions:", ""]
+    for a, b in (("raw_rag", "mem0"), ("raw_rag", "mem0_addonly"), ("mem0_addonly", "mem0"), ("oracle", "raw_rag")):
+        out.append(f"- {_paired(reader, recs, a, b, keep=both)}")
+    return "\n".join(out)
+
+
+def mem0_events(root: str, cids: list[str]) -> str:
+    """Changes Mem0 applied, summed over the split's clients (Mem0 does not report NONE decisions)."""
     base = Path(root).parent / "memory"
     rows = []
     for name in ("mem0", "mem0_addonly"):
         c = Counter()
         n = 0
-        for f in (base / name).glob("*/DONE"):
-            c.update(json.loads(f.read_text(encoding="utf-8")).get("events", {}))
-            n += 1
+        for cid in cids:
+            f = base / name / cid / "DONE"
+            if f.exists():
+                c.update(json.loads(f.read_text(encoding="utf-8")).get("events", {}))
+                n += 1
         if n:
-            rows.append(f"| {name} | {n} | " + " | ".join(str(c.get(k, 0)) for k in ("ADD", "UPDATE", "DELETE", "NONE")) + " |")
+            rows.append(f"| {name} | {n} | " + " | ".join(str(c.get(k, 0)) for k in ("ADD", "UPDATE", "DELETE", "failed_messages")) + " |")
     if not rows:
         return ""
-    return "\n".join(["## Mem0 write decisions (all clients)", "", "| Store | clients | ADD | UPDATE | DELETE | NONE |",
+    return "\n".join(["## Mem0 write decisions", "", "| Store | clients | ADD | UPDATE | DELETE | messages skipped |",
                       "|---|---|---|---|---|---|"] + rows)

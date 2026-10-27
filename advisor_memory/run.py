@@ -140,6 +140,20 @@ def prepare(args) -> int:
     return 0
 
 
+def rerank(args) -> int:
+    """Precompute Raw-RAG's reranked windows on the CPU while a reader uses the GPU."""
+    clients = load(args.data) if Path(args.data, "clients.jsonl").exists() else build_dataset()
+    clients = [c for c in clients if args.split == "all" or c.split == args.split]
+    rag = build_systems(["raw_rag"], WRITER)["raw_rag"]
+    for c in clients:
+        rag.prepare(c, Path(args.work))
+        t = time.time()
+        for q in c.questions:
+            rag.order(c, q)
+        print(f"[rerank] {c.cid} {len(c.questions)} questions in {time.time() - t:.0f}s", flush=True)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="advisor_memory", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -162,6 +176,10 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--split", default="test", choices=["dev", "test", "all"])
     sp.add_argument("--clients", nargs="*")
     sp.add_argument("--workers", type=int, default=3)
+    sp = sub.add_parser("rerank", help="precompute Raw-RAG's reranked windows (CPU)")
+    sp.add_argument("--data", default="data/dataset")
+    sp.add_argument("--work", default="runs/memory")
+    sp.add_argument("--split", default="test", choices=["dev", "test", "all"])
     sp = sub.add_parser("report", help="markdown tables from run directories")
     sp.add_argument("--runs", default="runs/main")
     sp.add_argument("--data", default="data/dataset")
@@ -177,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
         return run(args)
     if args.cmd == "prepare":
         return prepare(args)
+    if args.cmd == "rerank":
+        return rerank(args)
     from .report import report
     text = report(args.runs, args.data, args.split)
     if args.out:

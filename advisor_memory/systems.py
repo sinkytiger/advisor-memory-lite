@@ -99,16 +99,34 @@ class RawRAG(System):
 
     def prepare(self, client: Client, work: Path) -> None:
         self.index.build(client, work)
+        self.work = work
 
-    def context(self, client: Client, q: dict) -> dict:
+    def order(self, client: Client, q: dict) -> list[int]:
+        """The selected window ids. Retrieval does not depend on the reader, so the reranked order is cached
+        per question and shared by every reader (the CPU cross-encoder is the slow step)."""
+        cache = self.work / ("rerank" if self.reranker else "dense") / client.cid / f"{q['qid']}.json"
+        if cache.exists():
+            try:
+                return json.loads(cache.read_text(encoding="utf-8"))
+            except ValueError:
+                pass   # a power loss can leave the file full of NUL bytes; recompute it (the order is deterministic)
         turns, lines, windows, emb = self.index.data[client.cid]
         sims = emb @ self.index.embedder.query(q["text"])
-        cand = list(np.argsort(-sims)[:CANDIDATES])
+        cand = [int(i) for i in np.argsort(-sims)[:CANDIDATES]]
         if self.reranker:
             sc = np.asarray(self.reranker.scores(q["text"], [windows[i][1] for i in cand]))
             order = [cand[j] for j in np.argsort(-sc, kind="stable")[:SELECTED]]
         else:
             order = cand[:SELECTED]
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(order), encoding="utf-8")
+        os.replace(tmp, cache)   # atomic, so a parallel precompute and a reader never see half a file
+        return order
+
+    def context(self, client: Client, q: dict) -> dict:
+        turns, lines, windows, emb = self.index.data[client.cid]
+        order = self.order(client, q)
         # shown in rank order, each window expanded to its whole turns (no de-duplication, the paper's default)
         blocks = ["\n".join(lines[j] for j in windows[i][0]) for i in order]
         text = "\n\n".join(f"[Memory {k + 1}]\n{b}" for k, b in enumerate(blocks))

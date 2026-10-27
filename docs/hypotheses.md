@@ -65,4 +65,17 @@ Raw-RAG's wrong answers, the gold evidence turns were retrieved for most of them
 
 ## Changes after registration
 
-(none yet)
+* 2026-10-27: Ollama updated itself during the llama3.2:3b reader run on the test split, after 1,226 of 1,526
+  answers. The earlier answers ran on a previous 0.40.x release (the app log last records 0.40.5; the exact
+  version was not captured); the remaining llama3.2:3b answers and every qwen3:4b answer ran on 0.40.11. Per the
+  crash rule, the run was resumed from the saved answers, not restarted. The memories were all built before the
+  update.
+* 2026-10-27, no effect on answers: `scripts/run_all.sh` now waits for Ollama and retries a step that fails
+  because the server dropped out, and Raw-RAG's reranked window order is cached per question so both readers
+  share one CPU reranking pass (the order is deterministic, so the cache returns what a fresh pass would).
+* 2026-10-26 and 2026-10-27, no effect on answers: the PC lost power twice during the run (Windows logged
+  unexpected shutdowns, Kernel-Power event 41, at about 23:30 on 10-26 and 11:30 on 10-27). Each time the
+  run was resumed from the saved answers. The second loss left three of the cached dense window orders
+  (client c11, questions q10-q12) filled with NUL bytes; they were deleted and recomputed, and an unreadable
+  cache file is now recomputed instead of stopping the run. Every saved answer and memory store was checked
+  and read cleanly.
